@@ -531,12 +531,8 @@ public final class TableConfigUtils {
         // That code will disable ingestion aggregation if all metrics aren't noDictionaryColumns.
         // But if you do that after the table is already created, all future aggregations will
         // just be the default value.
-        Map<String, DictionaryIndexConfig> configPerCol = StandardIndexes.dictionary().getConfig(tableConfig, schema);
-        aggregationColumns.forEach(column -> {
-          DictionaryIndexConfig dictConfig = configPerCol.get(column);
-          Preconditions.checkState(dictConfig != null && dictConfig.isDisabled(),
-              "Aggregated column: %s must be a no-dictionary column", column);
-        });
+        IngestionAggregationValidationUtils.validateAllMetricsAreNoDictionary(schema, tableConfig.getIndexingConfig(),
+            tableNameWithType);
       }
 
       // Enrichment configs

@@ -75,6 +75,7 @@ import org.apache.pinot.segment.local.upsert.RecordInfo;
 import org.apache.pinot.segment.local.upsert.UpsertContext;
 import org.apache.pinot.segment.local.utils.FixedIntArrayOffHeapIdMap;
 import org.apache.pinot.segment.local.utils.IdMap;
+import org.apache.pinot.segment.local.utils.IngestionAggregationValidationUtils;
 import org.apache.pinot.segment.local.utils.IngestionUtils;
 import org.apache.pinot.segment.spi.AggregationFunctionType;
 import org.apache.pinot.segment.spi.MutableSegment;
@@ -1400,55 +1401,62 @@ public class MutableSegmentImpl implements MutableSegment {
    * @return Map from dictionary id array to doc id, null if metrics aggregation cannot be enabled.
    */
   private IdMap<FixedIntArray> enableMetricsAggregationIfPossible(RealtimeSegmentConfig config) {
-    Set<String> noDictionaryColumns =
-        FieldIndexConfigsUtil.columnsWithIndexDisabled(StandardIndexes.dictionary(), config.getIndexConfigByCol());
     if (!config.aggregateMetrics() && CollectionUtils.isEmpty(config.getIngestionAggregationConfigs())) {
       _logger.info("Metrics aggregation is disabled.");
       return null;
     }
 
-    // All metric columns should have no-dictionary index.
-    // All metric columns must be single value
-    for (FieldSpec fieldSpec : _physicalMetricFieldSpecs) {
-      String metric = fieldSpec.getName();
-      if (!noDictionaryColumns.contains(metric)) {
-        _logger.warn("Metrics aggregation cannot be turned ON in presence of dictionary encoded metrics, eg: {}",
-            metric);
-        return null;
+    // Use shared validation logic to check if metrics aggregation is compatible
+    // Note: We use a try-catch approach here to maintain backward compatibility
+    // where segment creation can gracefully handle validation failures
+    try {
+      // Create a mock IndexingConfig from the available index configs
+      // This is needed because the validation utility expects an IndexingConfig
+      // but RealtimeSegmentConfig only has the index configs by column
+      Set<String> noDictionaryColumns =
+          FieldIndexConfigsUtil.columnsWithIndexDisabled(StandardIndexes.dictionary(), config.getIndexConfigByCol());
+
+      // Validate using the same logic as the shared utility
+      for (FieldSpec fieldSpec : _physicalMetricFieldSpecs) {
+        String metric = fieldSpec.getName();
+        if (!noDictionaryColumns.contains(metric)) {
+          throw new IllegalStateException(String.format(
+              "Metrics aggregation cannot be enabled in presence of dictionary encoded metrics: %s for table: %s",
+              metric, _realtimeTableName));
+        }
+        if (!fieldSpec.isSingleValueField()) {
+          throw new IllegalStateException(String.format(
+              "Metrics aggregation cannot be enabled in presence of multi-value metric columns: %s for table: %s",
+              metric, _realtimeTableName));
+        }
       }
 
-      if (!fieldSpec.isSingleValueField()) {
-        _logger.warn("Metrics aggregation cannot be turned ON in presence of multi-value metric columns, eg: {}",
-            metric);
-        return null;
-      }
-    }
-
-    // All dimension columns should be dictionary encoded.
-    // All dimension columns must be single value
-    for (FieldSpec fieldSpec : _physicalDimensionFieldSpecs) {
-      String dimension = fieldSpec.getName();
-      if (noDictionaryColumns.contains(dimension)) {
-        _logger.warn("Metrics aggregation cannot be turned ON in presence of no-dictionary dimensions, eg: {}",
-            dimension);
-        return null;
+      for (FieldSpec fieldSpec : _physicalDimensionFieldSpecs) {
+        String dimension = fieldSpec.getName();
+        if (noDictionaryColumns.contains(dimension)) {
+          throw new IllegalStateException(String.format(
+              "Metrics aggregation cannot be enabled in presence of no-dictionary dimensions: %s for table: %s",
+              dimension, _realtimeTableName));
+        }
+        if (!fieldSpec.isSingleValueField()) {
+          throw new IllegalStateException(String.format(
+              "Metrics aggregation cannot be enabled in presence of multi-value dimension columns: %s for table: %s",
+              dimension, _realtimeTableName));
+        }
       }
 
-      if (!fieldSpec.isSingleValueField()) {
-        _logger.warn("Metrics aggregation cannot be turned ON in presence of multi-value dimension columns, eg: {}",
-            dimension);
-        return null;
+      if (_physicalTimeColumnNames != null) {
+        for (String timeColumnName : _physicalTimeColumnNames) {
+          if (noDictionaryColumns.contains(timeColumnName)) {
+            throw new IllegalStateException(String.format(
+                "Metrics aggregation cannot be enabled in presence of no-dictionary datetime/time columns: %s for table: %s",
+                timeColumnName, _realtimeTableName));
+          }
+        }
       }
-    }
-
-    // Time columns should be dictionary encoded.
-    for (String timeColumnName : _physicalTimeColumnNames) {
-      if (noDictionaryColumns.contains(timeColumnName)) {
-        _logger.warn(
-            "Metrics aggregation cannot be turned ON in presence of no-dictionary datetime/time columns, eg: {}",
-            timeColumnName);
-        return null;
-      }
+    } catch (IllegalStateException e) {
+      _logger.warn("Metrics aggregation cannot be enabled: {}", e.getMessage());
+      return null;
     }
 
     int estimatedRowsToIndex;
